@@ -2,6 +2,45 @@
 #import "MCData.h"
 #import "MCFont.h"
 #import "MCCalendarView.h"
+#import "MCSettingsWindowController.h"
+#import <QuartzCore/QuartzCore.h>
+
+static const CGFloat MCWindowWidth = 390;
+static const CGFloat MCWindowHeight = 700;
+
+static NSColor *MCSolidPanelBackgroundColor(void) {
+    return [NSColor colorWithName:@"MiniCalendarSolidPanelBackground"
+                  dynamicProvider:^NSColor *(NSAppearance *appearance) {
+        NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:
+            @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]
+        ];
+        if ([match isEqualToString:NSAppearanceNameDarkAqua]) {
+            return [NSColor colorWithSRGBRed:0.110 green:0.110 blue:0.118 alpha:1.0];
+        }
+        return NSColor.whiteColor;
+    }];
+}
+
+@interface MCSolidBackgroundView : NSView
+@end
+
+@implementation MCSolidBackgroundView
+
+- (BOOL)wantsUpdateLayer {
+    return YES;
+}
+
+- (void)updateLayer {
+    self.layer.backgroundColor = [MCSolidPanelBackgroundColor()
+        colorUsingColorSpace:NSColorSpace.sRGBColorSpace].CGColor;
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self setNeedsDisplay:YES];
+}
+
+@end
 
 static NSImage *MCStatusImage(NSDate *date) {
     NSInteger day = [MCCalendar() component:NSCalendarUnitDay fromDate:date];
@@ -28,54 +67,72 @@ static NSImage *MCStatusImage(NSDate *date) {
         NSForegroundColorAttributeName: NSColor.labelColor,
     };
     NSSize textSize = [text sizeWithAttributes:attributes];
-    [text drawAtPoint:NSMakePoint(10.5 - textSize.width / 2, 2.4) withAttributes:attributes];
+    CGFloat textY = day >= 10 ? 2.4 : 1.4;
+    [text drawAtPoint:NSMakePoint(10.5 - textSize.width / 2, textY)
+       withAttributes:attributes];
 
     [image unlockFocus];
     image.template = YES;
     return image;
 }
 
-static NSVisualEffectView *MCVibrancyContainerForContent(NSView *content, NSRect frame) {
+static NSView *MCSolidContainerForContent(NSView *content, NSRect frame) {
     content.frame = NSMakeRect(0, 0, NSWidth(frame), NSHeight(frame));
     content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    NSVisualEffectView *vibrancy = [[NSVisualEffectView alloc] initWithFrame:frame];
-    vibrancy.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    vibrancy.material = NSVisualEffectMaterialPopover;
-    vibrancy.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-    vibrancy.state = NSVisualEffectStateActive;
-    [vibrancy addSubview:content];
-    return vibrancy;
+    MCSolidBackgroundView *container = [[MCSolidBackgroundView alloc] initWithFrame:frame];
+    container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    container.wantsLayer = YES;
+    [container addSubview:content];
+    return container;
 }
 
-static NSView *MCGlassContainerForContent(NSView *content, NSRect frame) {
-    content.frame = NSMakeRect(0, 0, NSWidth(frame), NSHeight(frame));
-    content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-
-    if (@available(macOS 26.0, *)) {
-        NSView *container = [[NSView alloc] initWithFrame:frame];
-        container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-
-        NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:frame];
-        glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-        glass.style = NSGlassEffectViewStyleRegular;
-        glass.cornerRadius = 0;
-        glass.contentView = [[NSView alloc] initWithFrame:glass.bounds];
-        [container addSubview:glass];
-        [container addSubview:content];
-        return container;
-    }
-
-    return MCVibrancyContainerForContent(content, frame);
-}
-
-static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
+static NSView *MCFullWindowSolidContainer(NSView *content, NSRect frame) {
     NSView *stage = [[NSView alloc] initWithFrame:frame];
     stage.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    content.frame = NSMakeRect(0, 0, 390, 700);
+    content.frame = NSMakeRect(0, 0, MCWindowWidth, MCWindowHeight);
     content.autoresizingMask = NSViewWidthSizable;
     [stage addSubview:content];
-    return MCGlassContainerForContent(stage, frame);
+    return MCSolidContainerForContent(stage, frame);
+}
+
+static NSArray<NSNumber *> *MCVersionNumbers(NSString *version) {
+    if (![version isKindOfClass:NSString.class]) {
+        return nil;
+    }
+    NSString *number = [version hasPrefix:@"v"] || [version hasPrefix:@"V"]
+        ? [version substringFromIndex:1] : version;
+    NSArray<NSString *> *parts = [number componentsSeparatedByString:@"."];
+    if (parts.count == 0 || parts.count > 4) {
+        return nil;
+    }
+    NSCharacterSet *nonDigits = NSCharacterSet.decimalDigitCharacterSet.invertedSet;
+    NSMutableArray<NSNumber *> *numbers = [NSMutableArray arrayWithCapacity:parts.count];
+    for (NSString *part in parts) {
+        if (part.length == 0 || [part rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
+            return nil;
+        }
+        [numbers addObject:@(part.longLongValue)];
+    }
+    return numbers;
+}
+
+static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *installed) {
+    NSArray<NSNumber *> *candidateNumbers = MCVersionNumbers(candidate);
+    NSArray<NSNumber *> *installedNumbers = MCVersionNumbers(installed);
+    if (!candidateNumbers || !installedNumbers) {
+        return NSOrderedSame;
+    }
+    NSUInteger count = MAX(candidateNumbers.count, installedNumbers.count);
+    for (NSUInteger index = 0; index < count; index++) {
+        long long left = index < candidateNumbers.count
+            ? candidateNumbers[index].longLongValue : 0;
+        long long right = index < installedNumbers.count
+            ? installedNumbers[index].longLongValue : 0;
+        if (left < right) return NSOrderedAscending;
+        if (left > right) return NSOrderedDescending;
+    }
+    return NSOrderedSame;
 }
 
 @interface MCAppDelegate : NSObject <NSApplicationDelegate>
@@ -84,6 +141,14 @@ static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
 @property(nonatomic, strong) NSPanel *window;
 @property(nonatomic, strong) MCCalendarView *calendarView;
 @property(nonatomic, strong) NSTimer *midnightTimer;
+@property(nonatomic, strong) NSTimer *updateTimer;
+@property(nonatomic) BOOL updateCheckInProgress;
+@property(nonatomic, copy) NSString *pendingUpdateVersion;
+@property(nonatomic, strong) NSURL *pendingUpdateURL;
+
+- (void)checkForUpdates:(id)sender;
+- (void)checkForUpdatesAutomatically;
+- (void)showUpdateVersion:(NSString *)version URL:(NSURL *)URL;
 
 @end
 
@@ -91,12 +156,12 @@ static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     self.calendarView = [[MCCalendarView alloc]
-        initWithFrame:NSMakeRect(0, 0, 390, 700)
+        initWithFrame:NSMakeRect(0, 0, MCWindowWidth, MCWindowHeight)
              defaults:NSUserDefaults.standardUserDefaults
     ];
 
     self.window = [[NSPanel alloc]
-        initWithContentRect:NSMakeRect(0, 0, 390, 700)
+        initWithContentRect:NSMakeRect(0, 0, MCWindowWidth, MCWindowHeight)
                   styleMask:NSWindowStyleMaskTitled
                             | NSWindowStyleMaskClosable
                             | NSWindowStyleMaskMiniaturizable
@@ -109,8 +174,8 @@ static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
     self.window.titleVisibility = NSWindowTitleHidden;
     self.window.titlebarAppearsTransparent = YES;
     self.window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
-    self.window.opaque = NO;
-    self.window.backgroundColor = NSColor.clearColor;
+    self.window.opaque = YES;
+    self.window.backgroundColor = MCSolidPanelBackgroundColor();
     self.window.hasShadow = YES;
     self.window.releasedWhenClosed = NO;
     self.window.hidesOnDeactivate = NO;
@@ -121,10 +186,10 @@ static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
     self.window.collectionBehavior =
         NSWindowCollectionBehaviorCanJoinAllSpaces
         | NSWindowCollectionBehaviorFullScreenAuxiliary;
-    self.window.contentMinSize = NSMakeSize(390, 700);
-    self.window.contentMaxSize = NSMakeSize(390, 700);
+    self.window.contentMinSize = NSMakeSize(MCWindowWidth, MCWindowHeight);
+    self.window.contentMaxSize = NSMakeSize(MCWindowWidth, MCWindowHeight);
     NSRect fullWindowBounds = self.window.contentView.bounds;
-    self.window.contentView = MCFullWindowGlassContainer(
+    self.window.contentView = MCFullWindowSolidContainer(
         self.calendarView,
         fullWindowBounds
     );
@@ -145,6 +210,7 @@ static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
     if (![self.window setFrameUsingName:@"MiniCalendarWindowFrame"]) {
         [self.window center];
     }
+    [self.window setContentSize:NSMakeSize(MCWindowWidth, MCWindowHeight)];
     [self.window setFrameAutosaveName:@"MiniCalendarWindowFrame"];
 
     self.statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:32];
@@ -166,6 +232,15 @@ static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
     [self scheduleMidnightRefresh];
     [self showWindow];
     [self.calendarView startSystemSync];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self checkForUpdatesAutomatically];
+    });
+    self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:24 * 60 * 60
+                                                       target:self
+                                                     selector:@selector(checkForUpdatesAutomatically)
+                                                     userInfo:nil
+                                                      repeats:YES];
 }
 
 - (void)toggleWindow:(id)sender {
@@ -182,6 +257,13 @@ static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
     [self.calendarView refreshSystemData];
     [NSApplication.sharedApplication activateIgnoringOtherApps:YES];
     [self.window makeKeyAndOrderFront:nil];
+    if (self.pendingUpdateVersion) {
+        NSString *version = self.pendingUpdateVersion;
+        NSURL *URL = self.pendingUpdateURL;
+        self.pendingUpdateVersion = nil;
+        self.pendingUpdateURL = nil;
+        [self showUpdateVersion:version URL:URL];
+    }
 }
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender
@@ -218,9 +300,131 @@ static NSView *MCFullWindowGlassContainer(NSView *content, NSRect frame) {
     [self systemDateChanged:nil];
 }
 
+- (void)checkForUpdatesAutomatically {
+    [self fetchLatestReleaseManually:NO];
+}
+
+- (void)checkForUpdates:(id)sender {
+    (void)sender;
+    [self fetchLatestReleaseManually:YES];
+}
+
+- (void)fetchLatestReleaseManually:(BOOL)manual {
+    if (self.updateCheckInProgress) {
+        if (manual) {
+            [self showUpdateMessage:@"正在检查更新，请稍候。"];
+        }
+        return;
+    }
+    self.updateCheckInProgress = YES;
+    NSURL *URL = [NSURL URLWithString:
+        @"https://api.github.com/repos/nicing/mini-calendar/releases/latest"];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       timeoutInterval:10];
+    [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"MiniCalendar" forHTTPHeaderField:@"User-Agent"];
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession
+        dataTaskWithRequest:request
+         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.updateCheckInProgress = NO;
+            NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+            if (error || status != 200) {
+                if (manual) {
+                    [self showUpdateMessage:status == 404
+                        ? @"GitHub 上暂时没有已发布的版本。"
+                        : @"检查更新失败，请稍后重试。"];
+                }
+                return;
+            }
+            NSDictionary *release = data ? [NSJSONSerialization JSONObjectWithData:data
+                                                                      options:0
+                                                                        error:nil] : nil;
+            if (![release isKindOfClass:NSDictionary.class]) {
+                if (manual) [self showUpdateMessage:@"无法读取 GitHub 的版本信息。"];
+                return;
+            }
+            NSString *tag = release[@"tag_name"];
+            NSString *page = release[@"html_url"];
+            NSString *installed = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
+            NSURL *releaseURL = [page isKindOfClass:NSString.class]
+                ? [NSURL URLWithString:page] : nil;
+            NSArray *assets = release[@"assets"];
+            BOOL hasDMG = NO;
+            if ([assets isKindOfClass:NSArray.class]) {
+                for (id asset in assets) {
+                    if ([asset isKindOfClass:NSDictionary.class]
+                        && [asset[@"name"] isKindOfClass:NSString.class]
+                        && [asset[@"name"] hasSuffix:@".dmg"]) {
+                        hasDMG = YES;
+                        break;
+                    }
+                }
+            }
+            BOOL validPage = [releaseURL.scheme isEqualToString:@"https"]
+                && [releaseURL.host isEqualToString:@"github.com"]
+                && [releaseURL.path hasPrefix:@"/nicing/mini-calendar/releases/"];
+            if (!MCVersionNumbers(tag) || !validPage) {
+                if (manual) [self showUpdateMessage:@"无法读取 GitHub 的版本信息。"];
+                return;
+            }
+            if (!hasDMG) {
+                if (manual) [self showUpdateMessage:@"GitHub 上暂时没有可下载的安装包。"];
+                return;
+            }
+            if (MCCompareVersions(tag, installed) != NSOrderedDescending) {
+                if (manual) [self showUpdateMessage:@"当前已是最新版本。"];
+                return;
+            }
+            NSString *version = [tag hasPrefix:@"v"] || [tag hasPrefix:@"V"]
+                ? [tag substringFromIndex:1] : tag;
+            NSString *lastNotified = [NSUserDefaults.standardUserDefaults
+                stringForKey:@"MiniCalendarLastNotifiedUpdateVersion"];
+            if (!manual && [lastNotified isEqualToString:version]) {
+                return;
+            }
+            [NSUserDefaults.standardUserDefaults setObject:version
+                                                    forKey:@"MiniCalendarLastNotifiedUpdateVersion"];
+            if (!self.window.visible) {
+                self.pendingUpdateVersion = version;
+                self.pendingUpdateURL = releaseURL;
+                return;
+            }
+            [self showUpdateVersion:version URL:releaseURL];
+        });
+    }];
+    [task resume];
+}
+
+- (void)showUpdateMessage:(NSString *)message {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"检查更新";
+    alert.informativeText = message;
+    [alert addButtonWithTitle:@"好"];
+    [alert beginSheetModalForWindow:self.window completionHandler:nil];
+}
+
+- (void)showUpdateVersion:(NSString *)version URL:(NSURL *)URL {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"极简日历 %@ 已发布", version];
+    NSString *installed = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"未知";
+    alert.informativeText = [NSString stringWithFormat:
+        @"当前版本 %@。可以前往 GitHub 下载新版本。", installed];
+    [alert addButtonWithTitle:@"查看更新"];
+    [alert addButtonWithTitle:@"稍后"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response == NSAlertFirstButtonReturn) {
+            [NSWorkspace.sharedWorkspace openURL:URL];
+        }
+    }];
+}
+
 @end
 
-static NSEvent *MCTestScrollEvent(int32_t horizontalDelta, int32_t verticalDelta) {
+static NSEvent *MCTestScrollEventAtPoint(int32_t horizontalDelta,
+                                         int32_t verticalDelta,
+                                         NSPoint point) {
     CGEventRef cgEvent = CGEventCreateScrollWheelEvent(
         NULL,
         kCGScrollEventUnitLine,
@@ -231,10 +435,14 @@ static NSEvent *MCTestScrollEvent(int32_t horizontalDelta, int32_t verticalDelta
     if (!cgEvent) {
         return nil;
     }
-    CGEventSetLocation(cgEvent, CGPointMake(100, 100));
+    CGEventSetLocation(cgEvent, CGPointMake(point.x, point.y));
     NSEvent *event = [NSEvent eventWithCGEvent:cgEvent];
     CFRelease(cgEvent);
     return event;
+}
+
+static NSEvent *MCTestScrollEvent(int32_t horizontalDelta, int32_t verticalDelta) {
+    return MCTestScrollEventAtPoint(horizontalDelta, verticalDelta, NSMakePoint(100, 100));
 }
 
 static NSEvent *MCTestMouseEvent(NSView *view, NSPoint point) {
@@ -252,9 +460,34 @@ static NSEvent *MCTestMouseEvent(NSView *view, NSPoint point) {
 
 static int MCRunSelfTests(void) {
     [NSApplication sharedApplication];
+    if (MCCompareVersions(@"v1.10.0", @"1.9.0") != NSOrderedDescending
+        || MCCompareVersions(@"1.1", @"1.1.0") != NSOrderedSame
+        || MCCompareVersions(@"v1.0.9", @"1.1.0") != NSOrderedAscending
+        || MCVersionNumbers(@"1.2-beta") != nil) return 41;
     if (!MCRegisterBundledFonts()) return 24;
+    NSArray<NSString *> *accentIdentifiers = MCAccentColorIdentifiers();
+    if (accentIdentifiers.count != 11
+        || ![accentIdentifiers.firstObject isEqualToString:@"red"]
+        || ![MCAccentColorName(@"violet") isEqualToString:@"亮紫色"]
+        || !MCAccentColorForIdentifier(@"blue")) return 38;
+    MCSettingsWindowController *settingsController =
+        [[MCSettingsWindowController alloc] init];
+    NSArray *swatchButtons = [settingsController valueForKey:@"swatchButtons"];
+    if (swatchButtons.count != accentIdentifiers.count
+        || NSWidth(settingsController.window.contentView.bounds) != 452) return 39;
     NSFont *latinFont = MCLatinFont(16, NSFontWeightSemibold);
     if (![latinFont.fontName containsString:@"MiSansLatin"]) return 25;
+    NSArray<NSString *> *figmaIconNames = @[
+        @"add", @"chevron-left", @"chevron-right", @"dashed-divider",
+        @"date-separator", @"delete", @"divider", @"more", @"today",
+        @"todo-complete", @"todo-incomplete"
+    ];
+    for (NSString *iconName in figmaIconNames) {
+        NSURL *iconURL = [NSBundle.mainBundle URLForResource:iconName
+                                              withExtension:@"svg"
+                                               subdirectory:@"FigmaIcons"];
+        if (!iconURL) return 40;
+    }
     MCHolidayService *holidays = [[MCHolidayService alloc] init];
     MCHoliday *spring = [holidays holidayForDate:MCDateFromKey(@"2026-02-17")];
     MCHoliday *dayOff = [holidays holidayForDate:MCDateFromKey(@"2026-02-18")];
@@ -304,24 +537,25 @@ static int MCRunSelfTests(void) {
         [NSString stringWithFormat:@"MiniCalendarGestureTests.%@", NSUUID.UUID.UUIDString]
     ];
     MCCalendarView *gestureView = [[MCCalendarView alloc]
-        initWithFrame:NSMakeRect(0, 0, 390, 700)
+        initWithFrame:NSMakeRect(0, 0, MCWindowWidth, MCWindowHeight)
               defaults:gestureDefaults
         systemIntegrationEnabled:NO
     ];
     NSTextField *todoField = [gestureView valueForKey:@"todoField"];
     if (!todoField.isEditable || !todoField.isSelectable || !todoField.isEnabled) return 16;
     if (![todoField acceptsFirstMouse:nil]) return 17;
+    if (NSMaxX(todoField.frame) != 356) return 37;
     NSTextField *editTodoField = [gestureView valueForKey:@"editTodoField"];
     if (!editTodoField.isEditable || !editTodoField.isSelectable || !editTodoField.isHidden) return 21;
     NSPoint todoCenter = NSMakePoint(NSMidX(todoField.frame), NSMidY(todoField.frame));
-    NSView *gestureRoot = MCFullWindowGlassContainer(
+    NSView *gestureRoot = MCFullWindowSolidContainer(
         gestureView,
-        NSMakeRect(0, 0, 390, 700)
+        NSMakeRect(0, 0, MCWindowWidth, MCWindowHeight)
     );
     NSPoint rootTodoCenter = [gestureView convertPoint:todoCenter toView:gestureRoot];
     if ([gestureRoot hitTest:rootTodoCenter] != todoField) return 18;
     NSWindow *interactionWindow = [[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 390, 700)
+        initWithContentRect:NSMakeRect(0, 0, MCWindowWidth, MCWindowHeight)
                   styleMask:NSWindowStyleMaskBorderless
                     backing:NSBackingStoreBuffered
                       defer:NO];
@@ -333,7 +567,8 @@ static int MCRunSelfTests(void) {
     NSArray<NSDictionary *> *interactionRows = [interactionStore itemsForDate:interactionDate];
     [gestureView setValue:interactionRows forKey:@"visibleTodos"];
     [gestureView setValue:interactionRows forKey:@"agendaRows"];
-    CGFloat interactionRowCenterY = todoField.frame.origin.y + 49 + 18.5;
+    CGFloat interactionRowCenterY = todoField.frame.origin.y
+        + (131 - 72.5) + 24;
     NSEvent *editClick = MCTestMouseEvent(
         gestureView,
         NSMakePoint(100, interactionRowCenterY)
@@ -349,6 +584,17 @@ static int MCRunSelfTests(void) {
         NSMakePoint(30, interactionRowCenterY)
     )];
     if (![[interactionStore itemsForDate:interactionDate].firstObject[@"done"] boolValue]) return 23;
+
+    NSDate *gestureToday = [gestureView valueForKey:@"today"];
+    NSDate *dayBeforeToday = [calendar dateByAddingUnit:NSCalendarUnitDay
+                                                  value:-1
+                                                 toDate:gestureToday
+                                                options:0];
+    [gestureView setValue:dayBeforeToday forKey:@"selectedDate"];
+    [gestureView mouseDown:MCTestMouseEvent(gestureView, NSMakePoint(329, 58))];
+    if (![calendar isDate:[gestureView valueForKey:@"selectedDate"]
+            inSameDayAsDate:gestureToday]) return 27;
+
     NSDate *initialMonth = [gestureView valueForKey:@"displayedMonth"];
     [gestureView scrollWheel:MCTestScrollEvent(1, 0)];
     NSDate *nextMonth = [gestureView valueForKey:@"displayedMonth"];
@@ -375,6 +621,32 @@ static int MCRunSelfTests(void) {
     [gestureView scrollWheel:MCTestScrollEvent(0, -1)];
     if ([[gestureView valueForKey:@"weekViewEnabled"] boolValue]) return 15;
 
+    NSPoint footerPoint = NSMakePoint(200, 680);
+    [gestureView scrollWheel:MCTestScrollEventAtPoint(0, 1, footerPoint)];
+    if (![[gestureView valueForKey:@"weekViewEnabled"] boolValue]) return 28;
+    [gestureView scrollWheel:MCTestScrollEventAtPoint(0, -1, footerPoint)];
+    if ([[gestureView valueForKey:@"weekViewEnabled"] boolValue]) return 29;
+
+    NSPoint inputPoint = NSMakePoint(NSMidX(todoField.frame), NSMidY(todoField.frame));
+    [todoField scrollWheel:MCTestScrollEventAtPoint(0, 1, inputPoint)];
+    if (![[gestureView valueForKey:@"weekViewEnabled"] boolValue]) return 30;
+    inputPoint = NSMakePoint(NSMidX(todoField.frame), NSMidY(todoField.frame));
+    [todoField scrollWheel:MCTestScrollEventAtPoint(0, -1, inputPoint)];
+    if ([[gestureView valueForKey:@"weekViewEnabled"] boolValue]) return 31;
+
+    [gestureView updateTrackingAreas];
+    NSTrackingArea *progressArea = [gestureView valueForKey:@"yearProgressTrackingArea"];
+    if (!progressArea
+        || NSMinX(progressArea.rect) != 0
+        || NSWidth(progressArea.rect) != 390) return 32;
+    if ([[gestureView valueForKey:@"yearProgressHovered"] boolValue]) return 33;
+    if ([[gestureView valueForKey:@"yearProgressReveal"] doubleValue] != 0) return 34;
+    [gestureView setValue:@YES forKey:@"yearProgressHovered"];
+    [gestureView setValue:@0.5 forKey:@"yearProgressReveal"];
+    if ([[gestureView valueForKey:@"shouldDrawYearProgressTooltip"] boolValue]) return 35;
+    [gestureView setValue:@1.0 forKey:@"yearProgressReveal"];
+    if (![[gestureView valueForKey:@"shouldDrawYearProgressTooltip"] boolValue]) return 36;
+
     NSLog(@"All MiniCalendar self-tests passed.");
     return 0;
 }
@@ -386,21 +658,75 @@ static int MCRenderPreview(NSString *path, NSString *appearanceMode, NSString *c
     ];
     MCTodoStore *previewStore = [[MCTodoStore alloc] initWithDefaults:defaults];
     NSDate *today = [MCCalendar() startOfDayForDate:[NSDate date]];
-    [previewStore addTitle:@"整理今天的计划" forDate:today];
-    [previewStore addTitle:@"回复两封邮件" forDate:today];
-    [previewStore addTitle:@"晚间散步" forDate:today];
-    NSDictionary *completedItem = [previewStore itemsForDate:today].firstObject;
-    [previewStore toggleItemWithID:completedItem[@"id"]];
+    BOOL matchesFigmaFixture = [calendarMode isEqualToString:@"figma"];
+    if (matchesFigmaFixture) {
+        [NSUserDefaults.standardUserDefaults setVolatileDomain:
+            @{@"MiniCalendarAccentColor": @"red"}
+                                                      forName:NSArgumentDomain];
+    }
+    NSDate *previewDate = matchesFigmaFixture
+        ? MCDateFromKey(@"2026-08-30")
+        : today;
+    if (matchesFigmaFixture) {
+        [previewStore addTitle:@"每周工作总结" forDate:previewDate];
+        [previewStore addTitle:@"每周工作总结" forDate:previewDate];
+        [previewStore addTitle:@"Jev 研究" forDate:previewDate];
+        [previewStore addTitle:@"Jev 研究" forDate:previewDate];
+        NSArray<NSDictionary *> *items = [previewStore itemsForDate:previewDate];
+        [previewStore toggleItemWithID:items[2][@"id"]];
+        [previewStore toggleItemWithID:items[3][@"id"]];
+    } else {
+        [previewStore addTitle:@"整理今天的计划" forDate:previewDate];
+        [previewStore addTitle:@"回复两封邮件" forDate:previewDate];
+        [previewStore addTitle:@"晚间散步" forDate:previewDate];
+        NSDictionary *completedItem = [previewStore itemsForDate:previewDate].firstObject;
+        [previewStore toggleItemWithID:completedItem[@"id"]];
+    }
 
     MCCalendarView *view = [[MCCalendarView alloc]
-        initWithFrame:NSMakeRect(0, 0, 390, 700)
+        initWithFrame:NSMakeRect(0, 0, MCWindowWidth, MCWindowHeight)
               defaults:defaults
         systemIntegrationEnabled:NO
     ];
-    if ([calendarMode isEqualToString:@"week"]) {
+    if (matchesFigmaFixture) {
+        [view setValue:MCDateFromKey(@"2026-08-27") forKey:@"today"];
+        [view setValue:previewDate forKey:@"selectedDate"];
+        [view setValue:MCDateFromKey(@"2026-08-01") forKey:@"displayedMonth"];
         [view showWeekView];
+        [view showMonthView];
+        NSArray<NSDictionary *> *items = [previewStore itemsForDate:previewDate];
+        [view setValue:items forKey:@"visibleTodos"];
+        [view setValue:items forKey:@"agendaRows"];
+    } else if ([calendarMode isEqualToString:@"week"]) {
+        [view showWeekView];
+    } else if ([calendarMode isEqualToString:@"progress-hover"]) {
+        [view setValue:@YES forKey:@"yearProgressHovered"];
+        [view setValue:@1.0 forKey:@"yearProgressReveal"];
+    } else if ([calendarMode isEqualToString:@"overdue"]) {
+        NSDictionary *overdueTodo = @{
+            @"kind": @"todo",
+            @"id": @"preview-overdue",
+            @"title": @"提交报销单",
+            @"done": @NO,
+            @"overdue": @YES,
+            @"createdAt": [NSDate distantPast],
+            @"time": @"",
+        };
+        NSDictionary *todayTodo = @{
+            @"kind": @"todo",
+            @"id": @"preview-today",
+            @"title": @"回复两封邮件",
+            @"done": @NO,
+            @"overdue": @NO,
+            @"createdAt": [NSDate date],
+            @"time": @"",
+        };
+        NSArray<NSDictionary *> *todos = @[overdueTodo, todayTodo];
+        [view setValue:todos forKey:@"visibleTodos"];
+        [view setValue:todos forKey:@"agendaRows"];
     }
-    NSView *root = MCVibrancyContainerForContent(view, NSMakeRect(0, 0, 390, 700));
+    NSRect previewFrame = NSMakeRect(0, 0, MCWindowWidth, MCWindowHeight);
+    NSView *root = MCSolidContainerForContent(view, previewFrame);
     if ([appearanceMode isEqualToString:@"dark"]) {
         root.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
     } else if ([appearanceMode isEqualToString:@"light"]) {

@@ -1,0 +1,13 @@
+MiSans Latin
+=============
+
+This application embeds MiSans Latin for its interface digits and Latin text.
+
+Copyright 2020-2024 Beijing Xiaomi Mobile Software Co., Ltd.
+All Rights Reserved.
+
+MiSans is used under the MiSans Font Intellectual Property License Agreement.
+The full agreement is included as MiSans-License.pdf in this application.
+
+Official font page:
+https://hyperos.mi.com/font/en/download/

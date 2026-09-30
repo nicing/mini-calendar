@@ -2,6 +2,55 @@
 #import <EventKit/EventKit.h>
 #import "MCData.h"
 
+NSNotificationName const MCAccentColorDidChangeNotification =
+    @"MCAccentColorDidChangeNotification";
+
+static NSString * const MCAccentColorDefaultsKey = @"MiniCalendarAccentColor";
+static NSString * const MCDefaultAccentColorIdentifier = @"red";
+
+static NSArray<NSDictionary<NSString *, id> *> *MCAccentPalette(void) {
+    static NSArray<NSDictionary<NSString *, id> *> *palette;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        palette = @[
+            @{ @"id": @"red", @"name": @"红色",
+               @"color": [NSColor colorWithSRGBRed:0.910 green:0.345 blue:0.353 alpha:1.0] },
+            @{ @"id": @"blue", @"name": @"蓝色",
+               @"color": [NSColor colorWithSRGBRed:0.18 green:0.49 blue:0.97 alpha:1.0] },
+            @{ @"id": @"cyan", @"name": @"青色",
+               @"color": [NSColor colorWithSRGBRed:0.04 green:0.59 blue:0.71 alpha:1.0] },
+            @{ @"id": @"teal", @"name": @"蓝绿色",
+               @"color": [NSColor colorWithSRGBRed:0.03 green:0.61 blue:0.55 alpha:1.0] },
+            @{ @"id": @"green", @"name": @"绿色",
+               @"color": [NSColor colorWithSRGBRed:0.03 green:0.62 blue:0.40 alpha:1.0] },
+            @{ @"id": @"yellow", @"name": @"黄色",
+               @"color": [NSColor colorWithSRGBRed:0.96 green:0.71 blue:0.00 alpha:1.0],
+               @"darkForeground": @YES },
+            @{ @"id": @"orange", @"name": @"橙色",
+               @"color": [NSColor colorWithSRGBRed:1.00 green:0.38 blue:0.02 alpha:1.0],
+               @"darkForeground": @YES },
+            @{ @"id": @"pink", @"name": @"粉色",
+               @"color": [NSColor colorWithSRGBRed:0.94 green:0.16 blue:0.55 alpha:1.0] },
+            @{ @"id": @"purple", @"name": @"紫色",
+               @"color": [NSColor colorWithSRGBRed:0.56 green:0.00 blue:0.62 alpha:1.0] },
+            @{ @"id": @"violet", @"name": @"亮紫色",
+               @"color": [NSColor colorWithSRGBRed:0.43 green:0.00 blue:0.91 alpha:1.0] },
+            @{ @"id": @"gray", @"name": @"灰色",
+               @"color": [NSColor colorWithSRGBRed:0.34 green:0.35 blue:0.39 alpha:1.0] },
+        ];
+    });
+    return palette;
+}
+
+static NSDictionary<NSString *, id> *MCAccentOption(NSString *identifier) {
+    for (NSDictionary<NSString *, id> *option in MCAccentPalette()) {
+        if ([option[@"id"] isEqualToString:identifier]) {
+            return option;
+        }
+    }
+    return MCAccentPalette().firstObject;
+}
+
 NSCalendar *MCCalendar(void) {
     NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
     calendar.locale = [NSLocale localeWithLocaleIdentifier:@"zh_Hans_CN"];
@@ -10,8 +59,57 @@ NSCalendar *MCCalendar(void) {
     return calendar;
 }
 
+NSArray<NSString *> *MCAccentColorIdentifiers(void) {
+    static NSArray<NSString *> *identifiers;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableArray<NSString *> *values = [NSMutableArray array];
+        for (NSDictionary<NSString *, id> *option in MCAccentPalette()) {
+            [values addObject:option[@"id"]];
+        }
+        identifiers = values.copy;
+    });
+    return identifiers;
+}
+
+NSString *MCAccentColorIdentifier(void) {
+    NSString *identifier = [NSUserDefaults.standardUserDefaults
+        stringForKey:MCAccentColorDefaultsKey
+    ];
+    return [MCAccentColorIdentifiers() containsObject:identifier]
+        ? identifier
+        : MCDefaultAccentColorIdentifier;
+}
+
+NSString *MCAccentColorName(NSString *identifier) {
+    return MCAccentOption(identifier)[@"name"];
+}
+
+NSColor *MCAccentColorForIdentifier(NSString *identifier) {
+    return MCAccentOption(identifier)[@"color"];
+}
+
+void MCSetAccentColorIdentifier(NSString *identifier) {
+    if (![MCAccentColorIdentifiers() containsObject:identifier]
+        || [MCAccentColorIdentifier() isEqualToString:identifier]) {
+        return;
+    }
+    [NSUserDefaults.standardUserDefaults setObject:identifier
+                                            forKey:MCAccentColorDefaultsKey];
+    [NSNotificationCenter.defaultCenter
+        postNotificationName:MCAccentColorDidChangeNotification
+                      object:identifier];
+}
+
 NSColor *MCAccentColor(void) {
-    return [NSColor colorWithSRGBRed:0.98 green:0.31 blue:0.33 alpha:1.0];
+    return MCAccentColorForIdentifier(MCAccentColorIdentifier());
+}
+
+NSColor *MCAccentForegroundColor(void) {
+    NSDictionary<NSString *, id> *option = MCAccentOption(MCAccentColorIdentifier());
+    return [option[@"darkForeground"] boolValue]
+        ? [NSColor colorWithWhite:0.06 alpha:0.92]
+        : NSColor.whiteColor;
 }
 
 NSString *MCDateKey(NSDate *date) {
@@ -534,13 +632,19 @@ static NSString * const MCTodoMigrationKey = @"mini-calendar.todos.eventkit-migr
     NSCalendar *calendar = MCCalendar();
     NSDate *today = [calendar startOfDayForDate:[NSDate date]];
     NSMutableArray<NSDictionary *> *items = [[NSMutableArray alloc] init];
+    BOOL viewingToday = [calendar isDate:date inSameDayAsDate:today];
 
     for (EKReminder *reminder in reminders) {
         NSDateComponents *dateComponents = reminder.dueDateComponents ?: reminder.startDateComponents;
         NSDate *reminderDate = dateComponents ? [calendar dateFromComponents:dateComponents] : nil;
+        NSDate *reminderDay = reminderDate ? [calendar startOfDayForDate:reminderDate] : nil;
+        BOOL overdue = !reminder.completed
+            && reminderDay
+            && [reminderDay compare:today] == NSOrderedAscending;
         BOOL belongsToDate = reminderDate
-            ? [calendar isDate:reminderDate inSameDayAsDate:date]
-            : (!reminder.completed && [calendar isDate:date inSameDayAsDate:today]);
+            ? ([calendar isDate:reminderDate inSameDayAsDate:date]
+               || (viewingToday && overdue))
+            : (!reminder.completed && viewingToday);
         if (!belongsToDate) {
             continue;
         }
@@ -557,6 +661,7 @@ static NSString * const MCTodoMigrationKey = @"mini-calendar.todos.eventkit-migr
             @"id": reminder.calendarItemIdentifier ?: @"",
             @"title": reminder.title.length > 0 ? reminder.title : @"无标题待办",
             @"done": @(reminder.completed),
+            @"overdue": @(overdue),
             @"createdAt": reminder.creationDate ?: [NSDate distantPast],
             @"time": time,
             @"listTitle": reminder.calendar.title ?: @"提醒事项",
@@ -568,6 +673,11 @@ static NSString * const MCTodoMigrationKey = @"mini-calendar.todos.eventkit-migr
         BOOL rightDone = [right[@"done"] boolValue];
         if (leftDone != rightDone) {
             return leftDone ? NSOrderedDescending : NSOrderedAscending;
+        }
+        BOOL leftOverdue = [left[@"overdue"] boolValue];
+        BOOL rightOverdue = [right[@"overdue"] boolValue];
+        if (leftOverdue != rightOverdue) {
+            return leftOverdue ? NSOrderedAscending : NSOrderedDescending;
         }
         NSString *leftTime = left[@"time"];
         NSString *rightTime = right[@"time"];

@@ -1,11 +1,18 @@
-#import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXPORT NSString *MCDateKey(NSDate *date);
 FOUNDATION_EXPORT NSDate * _Nullable MCDateFromKey(NSString *key);
 FOUNDATION_EXPORT NSCalendar *MCCalendar(void);
+FOUNDATION_EXPORT NSNotificationName const MCAccentColorDidChangeNotification;
+FOUNDATION_EXPORT NSArray<NSString *> *MCAccentColorIdentifiers(void);
+FOUNDATION_EXPORT NSString *MCAccentColorIdentifier(void);
+FOUNDATION_EXPORT NSString *MCAccentColorName(NSString *identifier);
+FOUNDATION_EXPORT NSColor *MCAccentColorForIdentifier(NSString *identifier);
+FOUNDATION_EXPORT void MCSetAccentColorIdentifier(NSString *identifier);
 FOUNDATION_EXPORT NSColor *MCAccentColor(void);
+FOUNDATION_EXPORT NSColor *MCAccentForegroundColor(void);
 
 typedef NS_ENUM(NSInteger, MCHolidayKind) {
     MCHolidayKindFestival,

@@ -7,6 +7,9 @@ APP_DIR="$PROJECT_DIR/.build/MiniCalendar.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 FONT_FILE="$PROJECT_DIR/Resources/MiSansLatinVF.ttf"
+FONT_LICENSE_FILE="$PROJECT_DIR/Resources/MiSans-License.pdf"
+THIRD_PARTY_NOTICES_FILE="$PROJECT_DIR/Resources/THIRD_PARTY_NOTICES.txt"
+FIGMA_ICONS_DIR="$PROJECT_DIR/Resources/FigmaIcons"
 
 cd "$PROJECT_DIR"
 
@@ -14,6 +17,16 @@ if [[ ! -f "$FONT_FILE" ]]; then
     echo "Missing Resources/MiSansLatinVF.ttf"
     echo "Download MiSans Latin from https://hyperos.mi.com/font/en/download/"
     echo "and place MiSansLatinVF.ttf in the Resources directory."
+    exit 1
+fi
+
+if [[ ! -f "$FONT_LICENSE_FILE" || ! -f "$THIRD_PARTY_NOTICES_FILE" ]]; then
+    echo "Missing MiSans license resources in Resources/"
+    exit 1
+fi
+
+if [[ ! -d "$FIGMA_ICONS_DIR" ]]; then
+    echo "Missing exported Figma icons in Resources/FigmaIcons/"
     exit 1
 fi
 
@@ -31,6 +44,10 @@ clang \
     -o "$CONTENTS_DIR/MacOS/MiniCalendar"
 
 cp "$FONT_FILE" "$RESOURCES_DIR/MiSansLatinVF.ttf"
+cp "$FONT_LICENSE_FILE" "$RESOURCES_DIR/MiSans-License.pdf"
+cp "$THIRD_PARTY_NOTICES_FILE" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.txt"
+mkdir -p "$RESOURCES_DIR/FigmaIcons"
+cp "$FIGMA_ICONS_DIR"/*.svg "$RESOURCES_DIR/FigmaIcons/"
 
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -48,9 +65,11 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>MiSans Latin © 2020–2024 Beijing Xiaomi Mobile Software Co., Ltd. All Rights Reserved.</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
