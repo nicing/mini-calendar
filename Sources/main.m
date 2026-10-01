@@ -143,11 +143,18 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
 @property(nonatomic, strong) NSTimer *midnightTimer;
 @property(nonatomic, strong) NSTimer *updateTimer;
 @property(nonatomic) BOOL updateCheckInProgress;
+@property(nonatomic) BOOL manualUpdateCheckRequested;
+@property(nonatomic, strong) NSAlert *updateProgressAlert;
+@property(nonatomic, copy) dispatch_block_t pendingUpdatePresentation;
 @property(nonatomic, copy) NSString *pendingUpdateVersion;
 @property(nonatomic, strong) NSURL *pendingUpdateURL;
 
 - (void)checkForUpdates:(id)sender;
 - (void)checkForUpdatesAutomatically;
+- (void)showUpdateProgressIfNeeded;
+- (void)finishUpdateCheckWithMessage:(NSString *)message
+                            version:(NSString *)version
+                                URL:(NSURL *)URL;
 - (void)showUpdateVersion:(NSString *)version URL:(NSURL *)URL;
 
 @end
@@ -232,7 +239,7 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
     [self scheduleMidnightRefresh];
     [self showWindow];
     [self.calendarView startSystemSync];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [self checkForUpdatesAutomatically];
     });
@@ -310,10 +317,11 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
 }
 
 - (void)fetchLatestReleaseManually:(BOOL)manual {
+    if (manual) {
+        self.manualUpdateCheckRequested = YES;
+        [self showUpdateProgressIfNeeded];
+    }
     if (self.updateCheckInProgress) {
-        if (manual) {
-            [self showUpdateMessage:@"正在检查更新，请稍候。"];
-        }
         return;
     }
     self.updateCheckInProgress = YES;
@@ -329,12 +337,14 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             self.updateCheckInProgress = NO;
+            BOOL reportManually = self.manualUpdateCheckRequested;
+            self.manualUpdateCheckRequested = NO;
             NSInteger status = [(NSHTTPURLResponse *)response statusCode];
             if (error || status != 200) {
-                if (manual) {
-                    [self showUpdateMessage:status == 404
+                if (reportManually) {
+                    [self finishUpdateCheckWithMessage:status == 404
                         ? @"GitHub 上暂时没有已发布的版本。"
-                        : @"检查更新失败，请稍后重试。"];
+                        : @"检查更新失败，请稍后重试。" version:nil URL:nil];
                 }
                 return;
             }
@@ -342,7 +352,7 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
                                                                       options:0
                                                                         error:nil] : nil;
             if (![release isKindOfClass:NSDictionary.class]) {
-                if (manual) [self showUpdateMessage:@"无法读取 GitHub 的版本信息。"];
+                if (reportManually) [self finishUpdateCheckWithMessage:@"无法读取 GitHub 的版本信息。" version:nil URL:nil];
                 return;
             }
             NSString *tag = release[@"tag_name"];
@@ -366,22 +376,22 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
                 && [releaseURL.host isEqualToString:@"github.com"]
                 && [releaseURL.path hasPrefix:@"/nicing/mini-calendar/releases/"];
             if (!MCVersionNumbers(tag) || !validPage) {
-                if (manual) [self showUpdateMessage:@"无法读取 GitHub 的版本信息。"];
+                if (reportManually) [self finishUpdateCheckWithMessage:@"无法读取 GitHub 的版本信息。" version:nil URL:nil];
                 return;
             }
             if (!hasDMG) {
-                if (manual) [self showUpdateMessage:@"GitHub 上暂时没有可下载的安装包。"];
+                if (reportManually) [self finishUpdateCheckWithMessage:@"GitHub 上暂时没有可下载的安装包。" version:nil URL:nil];
                 return;
             }
             if (MCCompareVersions(tag, installed) != NSOrderedDescending) {
-                if (manual) [self showUpdateMessage:@"当前已是最新版本。"];
+                if (reportManually) [self finishUpdateCheckWithMessage:@"当前已是最新版本。" version:nil URL:nil];
                 return;
             }
             NSString *version = [tag hasPrefix:@"v"] || [tag hasPrefix:@"V"]
                 ? [tag substringFromIndex:1] : tag;
             NSString *lastNotified = [NSUserDefaults.standardUserDefaults
                 stringForKey:@"MiniCalendarLastNotifiedUpdateVersion"];
-            if (!manual && [lastNotified isEqualToString:version]) {
+            if (!reportManually && [lastNotified isEqualToString:version]) {
                 return;
             }
             [NSUserDefaults.standardUserDefaults setObject:version
@@ -391,10 +401,56 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
                 self.pendingUpdateURL = releaseURL;
                 return;
             }
-            [self showUpdateVersion:version URL:releaseURL];
+            if (reportManually) {
+                [self finishUpdateCheckWithMessage:nil version:version URL:releaseURL];
+            } else {
+                [self showUpdateVersion:version URL:releaseURL];
+            }
         });
     }];
     [task resume];
+}
+
+- (void)showUpdateProgressIfNeeded {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!self.updateCheckInProgress || !self.manualUpdateCheckRequested
+            || self.updateProgressAlert) return;
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"正在检查更新";
+        alert.informativeText = @"正在连接 GitHub…";
+        [alert addButtonWithTitle:@"在后台继续"];
+        self.updateProgressAlert = alert;
+        [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+            (void)response;
+            self.updateProgressAlert = nil;
+            dispatch_block_t presentation = self.pendingUpdatePresentation;
+            self.pendingUpdatePresentation = nil;
+            if (presentation) {
+                presentation();
+            } else {
+                self.manualUpdateCheckRequested = NO;
+            }
+        }];
+    });
+}
+
+- (void)finishUpdateCheckWithMessage:(NSString *)message
+                            version:(NSString *)version
+                                URL:(NSURL *)URL {
+    dispatch_block_t presentation = ^{
+        if (version) {
+            [self showUpdateVersion:version URL:URL];
+        } else {
+            [self showUpdateMessage:message];
+        }
+    };
+    if (self.updateProgressAlert) {
+        self.pendingUpdatePresentation = presentation;
+        [self.window endSheet:self.updateProgressAlert.window];
+    } else {
+        presentation();
+    }
 }
 
 - (void)showUpdateMessage:(NSString *)message {
