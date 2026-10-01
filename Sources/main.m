@@ -185,14 +185,12 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
     self.window.backgroundColor = MCSolidPanelBackgroundColor();
     self.window.hasShadow = YES;
     self.window.releasedWhenClosed = NO;
-    self.window.hidesOnDeactivate = NO;
+    self.window.hidesOnDeactivate = YES;
     self.window.floatingPanel = NO;
     self.window.level = NSNormalWindowLevel;
     self.window.becomesKeyOnlyIfNeeded = NO;
     self.window.animationBehavior = NSWindowAnimationBehaviorDocumentWindow;
-    self.window.collectionBehavior =
-        NSWindowCollectionBehaviorCanJoinAllSpaces
-        | NSWindowCollectionBehaviorFullScreenAuxiliary;
+    self.window.collectionBehavior = NSWindowCollectionBehaviorDefault;
     self.window.contentMinSize = NSMakeSize(MCWindowWidth, MCWindowHeight);
     self.window.contentMaxSize = NSMakeSize(MCWindowWidth, MCWindowHeight);
     NSRect fullWindowBounds = self.window.contentView.bounds;
@@ -256,6 +254,11 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
     } else {
         [self showWindow];
     }
+}
+
+- (void)applicationDidResignActive:(NSNotification *)notification {
+    (void)notification;
+    [self.window orderOut:nil];
 }
 
 - (void)showWindow {

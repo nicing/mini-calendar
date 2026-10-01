@@ -65,9 +65,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.1</string>
+    <string>1.1.2</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>NSHumanReadableCopyright</key>
     <string>MiSans Latin © 2020–2024 Beijing Xiaomi Mobile Software Co., Ltd. All Rights Reserved.</string>
     <key>LSMinimumSystemVersion</key>
