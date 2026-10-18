@@ -31,9 +31,11 @@ typedef NS_ENUM(NSInteger, MCHolidayKind) {
 
 @interface MCHolidayService : NSObject
 
+- (instancetype)initWithCacheURL:(nullable NSURL *)cacheURL;
 - (nullable MCHoliday *)holidayForDate:(NSDate *)date;
 - (nullable MCHoliday *)nextFestivalOnOrAfterDate:(NSDate *)date
                                       festivalDate:(NSDate * _Nullable * _Nullable)festivalDate;
+- (void)refreshIfNeededWithCompletion:(void (^)(BOOL changed))completion;
 
 @end
 

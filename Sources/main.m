@@ -265,6 +265,7 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
     self.statusItem.visible = YES;
     [self.calendarView refreshToday];
     [self.calendarView refreshSystemData];
+    [self.calendarView refreshHolidayData];
     [NSApplication.sharedApplication activateIgnoringOtherApps:YES];
     [self.window makeKeyAndOrderFront:nil];
     if (self.pendingUpdateVersion) {
@@ -311,6 +312,7 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
 }
 
 - (void)checkForUpdatesAutomatically {
+    [self.calendarView refreshHolidayData];
     [self fetchLatestReleaseManually:NO];
 }
 
@@ -517,8 +519,106 @@ static NSEvent *MCTestMouseEvent(NSView *view, NSPoint point) {
                               pressure:1.0];
 }
 
+@interface MCHolidayService (Testing)
+- (BOOL)applyUpdateData:(NSData *)data;
+@end
+
+static int MCRunHolidayDataTests(void) {
+    MCHolidayService *holidays = [[MCHolidayService alloc] initWithCacheURL:nil];
+    NSDictionary *expected = @{
+        @"2027-01-01": @"元旦", @"2027-02-05": @"除夕", @"2027-02-06": @"春节",
+        @"2027-04-05": @"清明", @"2027-05-01": @"劳动节", @"2027-06-09": @"端午",
+        @"2027-09-15": @"中秋", @"2027-10-01": @"国庆", @"2028-04-04": @"清明",
+        @"2100-04-05": @"清明", @"2101-01-01": @"元旦"
+    };
+    for (NSString *key in expected) {
+        if (![[holidays holidayForDate:MCDateFromKey(key)].label isEqualToString:expected[key]]) return 42;
+    }
+    if ([holidays holidayForDate:MCDateFromKey(@"2027-01-02")]
+        || [holidays holidayForDate:MCDateFromKey(@"2027-10-02")]) return 43;
+    NSDate *next = nil;
+    [holidays nextFestivalOnOrAfterDate:MCDateFromKey(@"2026-10-19") festivalDate:&next];
+    if (![MCDateKey(next) isEqualToString:@"2027-01-01"]) return 44;
+
+    // Lunar holidays occur once, including years with a leap fifth/eighth month.
+    for (NSInteger year = 2027; year <= 2045; year++) {
+        NSDate *day = MCDateFromKey([NSString stringWithFormat:@"%ld-01-01", (long)year]);
+        NSMutableDictionary *counts = [NSMutableDictionary dictionary];
+        NSCalendar *calendar = MCCalendar();
+        while ([calendar component:NSCalendarUnitYear fromDate:day] == year) {
+            MCHoliday *holiday = [holidays holidayForDate:day];
+            for (NSString *name in [holiday.label componentsSeparatedByString:@"·"]) {
+                counts[name] = @([counts[name] integerValue] + 1);
+            }
+            day = [calendar dateByAddingUnit:NSCalendarUnitDay value:1 toDate:day options:0];
+        }
+        for (NSString *name in @[@"春节", @"除夕", @"端午", @"中秋"]) {
+            if ([counts[name] integerValue] != 1) return 45;
+        }
+    }
+    NSDictionary *(^document)(NSNumber *, NSDictionary *) = ^NSDictionary *(NSNumber *revision, NSDictionary *days) {
+        return @{@"schemaVersion": @1, @"revision": revision, @"years": @{
+            @"2026": @{@"source": @"https://www.gov.cn/holiday-test", @"days": days}}};
+    };
+    NSData *(^encode)(NSDictionary *) = ^NSData *(NSDictionary *value) {
+        return [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
+    };
+    NSDictionary *days = @{@"2026-01-04": @{@"label": @"放假", @"kind": @"dayOff"}};
+    if (![holidays applyUpdateData:encode(document(@100, days))]
+        || [holidays holidayForDate:MCDateFromKey(@"2026-01-04")].kind != MCHolidayKindDayOff
+        || [holidays holidayForDate:MCDateFromKey(@"2026-01-02")] != nil) return 46;
+    // A malformed newer snapshot must leave the previous data intact.
+    NSDictionary *invalid = @{@"2026-02-30": @{@"label": @"补班", @"kind": @"workday"}};
+    if ([holidays applyUpdateData:encode(document(@101, invalid))]
+        || [holidays applyUpdateData:[@"[]" dataUsingEncoding:NSUTF8StringEncoding]]
+        || [holidays applyUpdateData:encode(document(@YES, days))]
+        || [holidays applyUpdateData:encode(document(@100, days))]) return 47;
+    if ([holidays holidayForDate:MCDateFromKey(@"2026-01-04")].kind != MCHolidayKindDayOff) return 48;
+    if (![holidays applyUpdateData:encode(document(@101, @{
+        @"2026-01-03": @{@"label": @"补班", @"kind": @"workday"}}))]
+        || [holidays holidayForDate:MCDateFromKey(@"2026-01-04")] != nil
+        || ![[holidays holidayForDate:MCDateFromKey(@"2025-10-06")].label isEqualToString:@"中秋"]
+        || ![[holidays holidayForDate:MCDateFromKey(@"2026-01-01")].label isEqualToString:@"元旦"]) return 49;
+    NSURL *cache = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+        stringByAppendingPathComponent:[@"MiniCalendarCacheTest-" stringByAppendingString:NSUUID.UUID.UUIDString]]];
+    [encode(document(@100, days)) writeToURL:cache atomically:YES];
+    MCHolidayService *cached = [[MCHolidayService alloc] initWithCacheURL:cache];
+    BOOL cachePassed = [cached holidayForDate:MCDateFromKey(@"2026-01-04")].kind == MCHolidayKindDayOff;
+    [[@"broken JSON" dataUsingEncoding:NSUTF8StringEncoding] writeToURL:cache atomically:YES];
+    cached = [[MCHolidayService alloc] initWithCacheURL:cache];
+    cachePassed = cachePassed
+        && [cached holidayForDate:MCDateFromKey(@"2026-01-04")].kind == MCHolidayKindMakeUpWork
+        && ![[cached valueForKey:@"hasValidCache"] boolValue];
+    [NSFileManager.defaultManager removeItemAtURL:cache error:nil];
+    if (!cachePassed) return 51;
+    return 0;
+}
+
+static int MCRunHolidaySyncTest(void) {
+    NSURL *directory = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+        stringByAppendingPathComponent:[@"MiniCalendarHolidayTest-" stringByAppendingString:NSUUID.UUID.UUIDString]]];
+    NSURL *cache = [directory URLByAppendingPathComponent:@"holidays.json"];
+    MCHolidayService *service = [[MCHolidayService alloc] initWithCacheURL:cache];
+    __block BOOL finished = NO;
+    [service refreshIfNeededWithCompletion:^(BOOL changed) { (void)changed; finished = YES; }];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+    while (!finished && deadline.timeIntervalSinceNow > 0) {
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+    MCHolidayService *offline = [[MCHolidayService alloc] initWithCacheURL:cache];
+    BOOL valid = finished && [NSData dataWithContentsOfURL:cache].length > 0
+        && [[offline valueForKey:@"updateDocument"] isEqual:[service valueForKey:@"updateDocument"]]
+        && [offline holidayForDate:MCDateFromKey(@"2026-10-10")].kind == MCHolidayKindMakeUpWork
+        && [[offline holidayForDate:MCDateFromKey(@"2027-01-01")].label isEqualToString:@"元旦"];
+    [NSFileManager.defaultManager removeItemAtURL:directory error:nil];
+    NSLog(@"Holiday remote download and offline cache test %@", valid ? @"passed" : @"FAILED");
+    return valid ? 0 : 50;
+}
+
 static int MCRunSelfTests(void) {
     [NSApplication sharedApplication];
+    int holidayResult = MCRunHolidayDataTests();
+    if (holidayResult) return holidayResult;
     if (MCCompareVersions(@"v1.10.0", @"1.9.0") != NSOrderedDescending
         || MCCompareVersions(@"1.1", @"1.1.0") != NSOrderedSame
         || MCCompareVersions(@"v1.0.9", @"1.1.0") != NSOrderedAscending
@@ -547,7 +647,7 @@ static int MCRunSelfTests(void) {
                                                subdirectory:@"FigmaIcons"];
         if (!iconURL) return 40;
     }
-    MCHolidayService *holidays = [[MCHolidayService alloc] init];
+    MCHolidayService *holidays = [[MCHolidayService alloc] initWithCacheURL:nil];
     MCHoliday *spring = [holidays holidayForDate:MCDateFromKey(@"2026-02-17")];
     MCHoliday *dayOff = [holidays holidayForDate:MCDateFromKey(@"2026-02-18")];
     MCHoliday *makeUp = [holidays holidayForDate:MCDateFromKey(@"2026-02-28")];
@@ -804,6 +904,9 @@ int main(void) {
         NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
         if ([arguments containsObject:@"--self-test"]) {
             return MCRunSelfTests();
+        }
+        if ([arguments containsObject:@"--self-test-holiday-sync"]) {
+            return MCRunHolidaySyncTest();
         }
         NSUInteger previewIndex = [arguments indexOfObject:@"--render-preview"];
         if (previewIndex != NSNotFound && previewIndex + 1 < arguments.count) {

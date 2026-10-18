@@ -11,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)startSystemSync;
 - (void)refreshSystemData;
 - (void)refreshToday;
+- (void)refreshHolidayData;
 - (void)showWeekView;
 - (void)showMonthView;
 

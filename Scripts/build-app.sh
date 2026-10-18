@@ -46,6 +46,8 @@ clang \
 cp "$FONT_FILE" "$RESOURCES_DIR/MiSansLatinVF.ttf"
 cp "$FONT_LICENSE_FILE" "$RESOURCES_DIR/MiSans-License.pdf"
 cp "$THIRD_PARTY_NOTICES_FILE" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.txt"
+cp "$PROJECT_DIR/Resources/qingming.json" "$RESOURCES_DIR/qingming.json"
+cp "$PROJECT_DIR/Data/holidays.json" "$RESOURCES_DIR/holidays.json"
 mkdir -p "$RESOURCES_DIR/FigmaIcons"
 cp "$FIGMA_ICONS_DIR"/*.svg "$RESOURCES_DIR/FigmaIcons/"
 
@@ -65,9 +67,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.2</string>
+    <string>1.2.0</string>
     <key>CFBundleVersion</key>
-    <string>4</string>
+    <string>5</string>
     <key>NSHumanReadableCopyright</key>
     <string>MiSans Latin © 2020–2024 Beijing Xiaomi Mobile Software Co., Ltd. All Rights Reserved.</string>
     <key>LSMinimumSystemVersion</key>

@@ -386,7 +386,8 @@ static NSColor *MCGlassControlFocusedBorderColor(NSView *view) {
     self = [super initWithFrame:frameRect];
     if (self) {
         _calendar = MCCalendar();
-        _holidays = [[MCHolidayService alloc] init];
+        _holidays = systemIntegrationEnabled ? [[MCHolidayService alloc] init]
+            : [[MCHolidayService alloc] initWithCacheURL:nil];
         _lunar = [[MCLunarService alloc] init];
         _systemIntegrationEnabled = systemIntegrationEnabled;
         if (systemIntegrationEnabled) {
@@ -1752,6 +1753,14 @@ static NSColor *MCGlassControlFocusedBorderColor(NSView *view) {
     [self updateTodoEditorFrame];
     [self refreshDeleteToolTips];
     [self setNeedsDisplay:YES];
+}
+
+- (void)refreshHolidayData {
+    if (!self.systemIntegrationEnabled) return;
+    __weak typeof(self) weakSelf = self;
+    [self.holidays refreshIfNeededWithCompletion:^(BOOL changed) {
+        if (changed) [weakSelf setNeedsDisplay:YES];
+    }];
 }
 
 - (NSString *)nextHolidayText {

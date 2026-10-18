@@ -150,23 +150,201 @@ NSDate *MCDateFromKey(NSString *key) {
 @interface MCHolidayService ()
 
 @property(nonatomic, strong) NSMutableDictionary<NSString *, MCHoliday *> *records;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *recurringYears;
+@property(nonatomic, strong) NSDictionary<NSString *, NSNumber *> *qingmingDays;
+@property(nonatomic, strong) NSURL *cacheURL;
+@property(nonatomic, strong) NSDictionary *updateDocument;
+@property(nonatomic, strong) NSDate *lastRefreshAttempt;
+@property(nonatomic) BOOL refreshing;
+@property(nonatomic) BOOL hasValidCache;
+
+- (BOOL)applyUpdateData:(NSData *)data;
 
 @end
 
 @implementation MCHolidayService
 
 - (instancetype)init {
+    NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory
+                                                         inDomains:NSUserDomainMask].firstObject;
+    NSURL *cacheURL = [[support URLByAppendingPathComponent:@"MiniCalendar" isDirectory:YES]
+        URLByAppendingPathComponent:@"holidays.json"];
+    return [self initWithCacheURL:cacheURL];
+}
+
+- (instancetype)initWithCacheURL:(NSURL *)cacheURL {
     self = [super init];
     if (self) {
         _records = [[NSMutableDictionary alloc] init];
-        [self load2025];
-        [self load2026];
+        _recurringYears = [[NSMutableDictionary alloc] init];
+        _cacheURL = cacheURL;
+        NSURL *qingmingURL = [NSBundle.mainBundle URLForResource:@"qingming" withExtension:@"json"];
+        NSData *qingmingData = qingmingURL ? [NSData dataWithContentsOfURL:qingmingURL] : nil;
+        _qingmingDays = qingmingData
+            ? [NSJSONSerialization JSONObjectWithData:qingmingData options:0 error:nil][@"days"] : @{};
+        NSURL *bundledURL = [NSBundle.mainBundle URLForResource:@"holidays" withExtension:@"json"];
+        NSData *bundled = bundledURL ? [NSData dataWithContentsOfURL:bundledURL] : nil;
+        if (bundled) [self applyUpdateData:bundled];
+        NSData *cached = cacheURL ? [NSData dataWithContentsOfURL:cacheURL] : nil;
+        if (cached) {
+            BOOL applied = [self applyUpdateData:cached];
+            id cachedDocument = cached.length <= 512 * 1024
+                ? [NSJSONSerialization JSONObjectWithData:cached options:0 error:nil] : nil;
+            _hasValidCache = applied || [cachedDocument isEqual:_updateDocument];
+        }
     }
     return self;
 }
 
 - (MCHoliday *)holidayForDate:(NSDate *)date {
-    return self.records[MCDateKey(date)];
+    NSString *key = MCDateKey(date);
+    if (self.records[key]) return self.records[key];
+    NSString *year = [key substringToIndex:4];
+    if (!self.recurringYears[year]) [self loadRecurringYear:year.integerValue];
+    return self.recurringYears[year][key];
+}
+
+- (void)loadRecurringYear:(NSInteger)year {
+    // Use Chinese civil dates (UTC+8), independently of the Mac's current time zone.
+    NSCalendar *solar = MCCalendar();
+    solar.timeZone = [NSTimeZone timeZoneWithName:@"Asia/Shanghai"];
+    NSCalendar *lunar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierChinese];
+    lunar.timeZone = solar.timeZone;
+    NSString *yearKey = [NSString stringWithFormat:@"%04ld", (long)year];
+    NSMutableDictionary *days = [NSMutableDictionary dictionary];
+    void (^add)(NSString *, NSString *) = ^(NSString *key, NSString *label) {
+        MCHoliday *existing = days[key];
+        NSString *name = existing ? [existing.label stringByAppendingFormat:@"·%@", label] : label;
+        days[key] = [[MCHoliday alloc] initWithLabel:name kind:MCHolidayKindFestival];
+    };
+    add([yearKey stringByAppendingString:@"-01-01"], @"元旦");
+    add([yearKey stringByAppendingString:@"-05-01"], @"劳动节");
+    add([yearKey stringByAppendingString:@"-10-01"], @"国庆");
+    NSInteger qingmingDay = self.qingmingDays[yearKey].integerValue;
+    if (qingmingDay >= 4 && qingmingDay <= 6) {
+        add([yearKey stringByAppendingFormat:@"-04-%02ld", (long)qingmingDay], @"清明");
+    }
+    NSDateComponents *start = [[NSDateComponents alloc] init];
+    start.year = year;
+    start.month = 1;
+    start.day = 1;
+    start.hour = 12;
+    NSDate *day = [solar dateFromComponents:start];
+    while (day && [solar component:NSCalendarUnitYear fromDate:day] == year) {
+        NSDateComponents *parts = [lunar components:NSCalendarUnitMonth | NSCalendarUnitDay fromDate:day];
+        NSDateComponents *civil = [solar components:NSCalendarUnitMonth | NSCalendarUnitDay fromDate:day];
+        NSString *key = [yearKey stringByAppendingFormat:@"-%02ld-%02ld", (long)civil.month, (long)civil.day];
+        if (!parts.isLeapMonth) {
+            if (parts.month == 1 && parts.day == 1) {
+                add(key, @"春节");
+                NSDate *eve = [solar dateByAddingUnit:NSCalendarUnitDay value:-1 toDate:day options:0];
+                NSDateComponents *eveParts = [solar components:NSCalendarUnitMonth | NSCalendarUnitDay fromDate:eve];
+                add([yearKey stringByAppendingFormat:@"-%02ld-%02ld", (long)eveParts.month, (long)eveParts.day], @"除夕");
+            } else if (parts.month == 5 && parts.day == 5) {
+                add(key, @"端午");
+            } else if (parts.month == 8 && parts.day == 15) {
+                add(key, @"中秋");
+            }
+        }
+        day = [solar dateByAddingUnit:NSCalendarUnitDay value:1 toDate:day options:0];
+    }
+    self.recurringYears[yearKey] = days.copy;
+}
+
+- (BOOL)applyUpdateData:(NSData *)data {
+    if (data.length == 0 || data.length > 512 * 1024) return NO;
+    id document = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![document isKindOfClass:NSDictionary.class]) return NO;
+    NSNumber *schema = document[@"schemaVersion"];
+    NSNumber *revision = document[@"revision"];
+    NSDictionary *years = document[@"years"];
+    if (![schema isKindOfClass:NSNumber.class] || schema.doubleValue != 1
+        || CFGetTypeID((__bridge CFTypeRef)schema) == CFBooleanGetTypeID()
+        || ![revision isKindOfClass:NSNumber.class] || revision.longLongValue < 1
+        || revision.doubleValue != revision.longLongValue
+        || CFGetTypeID((__bridge CFTypeRef)revision) == CFBooleanGetTypeID()
+        || ![years isKindOfClass:NSDictionary.class] || years.count == 0 || years.count > 200) return NO;
+    NSMutableDictionary *validated = [NSMutableDictionary dictionary];
+    for (NSString *year in years) {
+        if (![year isKindOfClass:NSString.class] || year.length != 4
+            || year.integerValue < 1901 || year.integerValue > 2199) return NO;
+        id entry = years[year];
+        if (![entry isKindOfClass:NSDictionary.class]) return NO;
+        NSString *source = entry[@"source"];
+        NSDictionary *days = entry[@"days"];
+        NSURL *sourceURL = [source isKindOfClass:NSString.class] ? [NSURL URLWithString:source] : nil;
+        if (![sourceURL.scheme isEqualToString:@"https"]
+            || !([sourceURL.host isEqualToString:@"gov.cn"] || [sourceURL.host hasSuffix:@".gov.cn"])
+            || ![days isKindOfClass:NSDictionary.class] || days.count == 0 || days.count > 366) return NO;
+        NSMutableDictionary *records = [NSMutableDictionary dictionary];
+        for (NSString *key in days) {
+            if (![key isKindOfClass:NSString.class] || key.length != 10
+                || ![key hasPrefix:[year stringByAppendingString:@"-"]]) return NO;
+            NSDate *date = MCDateFromKey(key);
+            if (!date || ![MCDateKey(date) isEqualToString:key]) return NO;
+            id value = days[key];
+            if (![value isKindOfClass:NSDictionary.class]) return NO;
+            NSString *label = value[@"label"];
+            NSString *kind = value[@"kind"];
+            if (![label isKindOfClass:NSString.class] || label.length == 0 || label.length > 12
+                || [label rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound
+                || ![@[@"festival", @"dayOff", @"workday"] containsObject:kind ?: NSNull.null]) return NO;
+            MCHolidayKind holidayKind = [kind isEqualToString:@"festival"] ? MCHolidayKindFestival
+                : [kind isEqualToString:@"dayOff"] ? MCHolidayKindDayOff : MCHolidayKindMakeUpWork;
+            records[key] = [[MCHoliday alloc] initWithLabel:label kind:holidayKind];
+        }
+        validated[year] = records;
+    }
+    if (revision.longLongValue <= [self.updateDocument[@"revision"] longLongValue]) return NO;
+    for (NSString *year in validated) {
+        for (NSString *key in self.records.allKeys) {
+            if ([key hasPrefix:[year stringByAppendingString:@"-"]]) [self.records removeObjectForKey:key];
+        }
+        [self.records addEntriesFromDictionary:validated[year]];
+    }
+    NSMutableDictionary *mergedYears = [self.updateDocument[@"years"] mutableCopy] ?: [NSMutableDictionary dictionary];
+    [mergedYears addEntriesFromDictionary:years];
+    self.updateDocument = @{@"schemaVersion": @1, @"revision": revision, @"years": mergedYears};
+    return YES;
+}
+
+- (void)refreshIfNeededWithCompletion:(void (^)(BOOL))completion {
+    if (self.refreshing || (self.lastRefreshAttempt && -self.lastRefreshAttempt.timeIntervalSinceNow < 3600)) {
+        completion(NO);
+        return;
+    }
+    NSDate *lastSuccess = self.cacheURL ? [NSFileManager.defaultManager
+        attributesOfItemAtPath:self.cacheURL.path error:nil][NSFileModificationDate] : nil;
+    if (self.hasValidCache && lastSuccess && -lastSuccess.timeIntervalSinceNow < 24 * 60 * 60) {
+        completion(NO);
+        return;
+    }
+    self.refreshing = YES;
+    self.lastRefreshAttempt = NSDate.date;
+    NSURL *URL = [NSURL URLWithString:@"https://raw.githubusercontent.com/nicing/mini-calendar/main/Data/holidays.json"];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL
+        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:10];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [[NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:
+        ^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.refreshing = NO;
+            BOOL changed = NO;
+            if (!error && [(NSHTTPURLResponse *)response statusCode] == 200) {
+                changed = [self applyUpdateData:data];
+                id received = data.length <= 512 * 1024
+                    ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+                // Write only the validated active snapshot. Invalid responses never replace the cache.
+                if (self.cacheURL && (changed || [received isEqual:self.updateDocument])) {
+                    [NSFileManager.defaultManager createDirectoryAtURL:self.cacheURL.URLByDeletingLastPathComponent
+                                          withIntermediateDirectories:YES attributes:nil error:nil];
+                    NSData *snapshot = [NSJSONSerialization dataWithJSONObject:self.updateDocument options:0 error:nil];
+                    self.hasValidCache = [snapshot writeToURL:self.cacheURL options:NSDataWritingAtomic error:nil];
+                }
+            }
+            completion(changed);
+        });
+    }] resume];
 }
 
 - (MCHoliday *)nextFestivalOnOrAfterDate:(NSDate *)date
@@ -187,81 +365,6 @@ NSDate *MCDateFromKey(NSString *key) {
         *festivalDate = nil;
     }
     return nil;
-}
-
-- (void)addFestival:(NSString *)name on:(NSString *)dateKey {
-    self.records[dateKey] = [[MCHoliday alloc] initWithLabel:name kind:MCHolidayKindFestival];
-}
-
-- (void)addMakeUpWorkDays:(NSArray<NSString *> *)dateKeys {
-    for (NSString *dateKey in dateKeys) {
-        self.records[dateKey] = [[MCHoliday alloc] initWithLabel:@"补班" kind:MCHolidayKindMakeUpWork];
-    }
-}
-
-- (void)addDayOffFrom:(NSString *)startKey through:(NSString *)endKey {
-    NSDate *current = MCDateFromKey(startKey);
-    NSDate *end = MCDateFromKey(endKey);
-    NSCalendar *calendar = MCCalendar();
-    while (current && end && [current compare:end] != NSOrderedDescending) {
-        self.records[MCDateKey(current)] = [[MCHoliday alloc] initWithLabel:@"放假" kind:MCHolidayKindDayOff];
-        current = [calendar dateByAddingUnit:NSCalendarUnitDay value:1 toDate:current options:0];
-    }
-}
-
-- (void)load2025 {
-    // 国办发明电〔2024〕12号
-    [self addDayOffFrom:@"2025-01-01" through:@"2025-01-01"];
-    [self addFestival:@"元旦" on:@"2025-01-01"];
-
-    [self addDayOffFrom:@"2025-01-28" through:@"2025-02-04"];
-    [self addFestival:@"除夕" on:@"2025-01-28"];
-    [self addFestival:@"春节" on:@"2025-01-29"];
-    [self addMakeUpWorkDays:@[@"2025-01-26", @"2025-02-08"]];
-
-    [self addDayOffFrom:@"2025-04-04" through:@"2025-04-06"];
-    [self addFestival:@"清明" on:@"2025-04-04"];
-
-    [self addDayOffFrom:@"2025-05-01" through:@"2025-05-05"];
-    [self addFestival:@"劳动节" on:@"2025-05-01"];
-    [self addMakeUpWorkDays:@[@"2025-04-27"]];
-
-    [self addDayOffFrom:@"2025-05-31" through:@"2025-06-02"];
-    [self addFestival:@"端午" on:@"2025-05-31"];
-
-    [self addDayOffFrom:@"2025-10-01" through:@"2025-10-08"];
-    [self addFestival:@"国庆" on:@"2025-10-01"];
-    [self addFestival:@"中秋" on:@"2025-10-06"];
-    [self addMakeUpWorkDays:@[@"2025-09-28", @"2025-10-11"]];
-}
-
-- (void)load2026 {
-    // 国办发明电〔2025〕7号
-    [self addDayOffFrom:@"2026-01-01" through:@"2026-01-03"];
-    [self addFestival:@"元旦" on:@"2026-01-01"];
-    [self addMakeUpWorkDays:@[@"2026-01-04"]];
-
-    [self addDayOffFrom:@"2026-02-15" through:@"2026-02-23"];
-    [self addFestival:@"除夕" on:@"2026-02-16"];
-    [self addFestival:@"春节" on:@"2026-02-17"];
-    [self addMakeUpWorkDays:@[@"2026-02-14", @"2026-02-28"]];
-
-    [self addDayOffFrom:@"2026-04-04" through:@"2026-04-06"];
-    [self addFestival:@"清明" on:@"2026-04-05"];
-
-    [self addDayOffFrom:@"2026-05-01" through:@"2026-05-05"];
-    [self addFestival:@"劳动节" on:@"2026-05-01"];
-    [self addMakeUpWorkDays:@[@"2026-05-09"]];
-
-    [self addDayOffFrom:@"2026-06-19" through:@"2026-06-21"];
-    [self addFestival:@"端午" on:@"2026-06-19"];
-
-    [self addDayOffFrom:@"2026-09-25" through:@"2026-09-27"];
-    [self addFestival:@"中秋" on:@"2026-09-25"];
-
-    [self addDayOffFrom:@"2026-10-01" through:@"2026-10-07"];
-    [self addFestival:@"国庆" on:@"2026-10-01"];
-    [self addMakeUpWorkDays:@[@"2026-09-20", @"2026-10-10"]];
 }
 
 @end

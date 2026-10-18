@@ -30,7 +30,7 @@ open .build/MiniCalendar.app
 .build/MiniCalendar.app/Contents/MacOS/MiniCalendar --self-test
 ```
 
-应用使用 `accessory` 激活策略，不显示 Dock 图标。启动后显示独立窄栏窗口，切换到其他应用时不会自动关闭；点击菜单栏中的日期日历图标可显示或收起窗口，右下角菜单可退出。
+应用使用 `accessory` 激活策略，不显示 Dock 图标。启动后显示独立窄栏窗口，切换到其他应用时收起面板；点击菜单栏中的日期日历图标可显示或收起窗口，右下角菜单可退出。
 
 App 会在启动后和持续运行期间每天检查一次 GitHub 上带 DMG 的正式发布版本。发现新版本时会提示并打开下载页；同一版本的自动提示只出现一次。也可以在右下角菜单中选择「检查更新…」。
 
@@ -50,6 +50,10 @@ App 会在启动后和持续运行期间每天检查一次 GitHub 上带 DMG 的
 - 农历由 macOS 自带的 `Calendar(identifier: .chinese)` 离线计算。
 - 2025 年放假与调休来自[国务院办公厅通知（国办发明电〔2024〕12号）](https://www.gov.cn/zhengce/zhengceku/202411/content_6986383.htm)。
 - 2026 年放假与调休来自[国务院办公厅通知（国办发明电〔2025〕7号）](https://www.gov.cn/zhengce/content/202511/content_7047090.htm)。
-- 尚未公布的年份只显示农历，不猜测调休安排。
+- 每年离线标注元旦、劳动节、国庆，以及按农历计算的除夕、春节、端午、中秋。尚未获得正式安排时，只标注节日当天，不推测连休或补班。
+- 清明日期采用[香港天文台对照表](https://www.hko.gov.hk/tc/gts/time/conversion1_text.htm)，内置 2025–2100 年。
+- 正式放假安排保存在 [`Data/holidays.json`](Data/holidays.json)。App 启动、重新打开面板及持续运行期间会在需要时从 GitHub 检查，成功缓存后 24 小时内不重复下载；失败至少间隔一小时再试。更新后自动刷新界面。
+- 数据先经过格式、日期和版本校验，再保存到 `~/Library/Application Support/MiniCalendar/holidays.json`。离线或下载失败时保留缓存；无有效缓存时使用内置安排和节日规则。
+- 后续只增加或修正假期数据不需要发布 App 新版：更新 JSON 并递增 `revision` 即可。使用现有 GitHub 仓库托管，无需自建服务器；日历显示规则或数据格式变化仍需要升级 App。维护方法见 [`Data/README.md`](Data/README.md)。
 
 跨设备同步由用户已在 macOS 中配置的 iCloud、Google 或 Exchange 等系统账户负责，App 不保存账户凭据。
