@@ -3,6 +3,7 @@
 #import "MCFont.h"
 #import "MCCalendarView.h"
 #import "MCSettingsWindowController.h"
+#import "MCUpdater.h"
 #import <QuartzCore/QuartzCore.h>
 
 static const CGFloat MCWindowWidth = 390;
@@ -147,15 +148,21 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
 @property(nonatomic, strong) NSAlert *updateProgressAlert;
 @property(nonatomic, copy) dispatch_block_t pendingUpdatePresentation;
 @property(nonatomic, copy) NSString *pendingUpdateVersion;
-@property(nonatomic, strong) NSURL *pendingUpdateURL;
+@property(nonatomic, copy) NSDictionary *availableUpdateAsset;
+@property(nonatomic, strong) MCUpdater *updater;
+@property(nonatomic, strong) NSAlert *downloadAlert;
+@property(nonatomic, strong) NSProgressIndicator *downloadIndicator;
+@property(nonatomic, copy) dispatch_block_t pendingDownloadPresentation;
+@property(nonatomic, copy) NSString *downloadVersion;
+@property(nonatomic, copy) NSString *downloadStatus;
+@property(nonatomic) double downloadFraction;
 
 - (void)checkForUpdates:(id)sender;
 - (void)checkForUpdatesAutomatically;
 - (void)showUpdateProgressIfNeeded;
 - (void)finishUpdateCheckWithMessage:(NSString *)message
-                            version:(NSString *)version
-                                URL:(NSURL *)URL;
-- (void)showUpdateVersion:(NSString *)version URL:(NSURL *)URL;
+                            version:(NSString *)version;
+- (void)showUpdateVersion:(NSString *)version;
 
 @end
 
@@ -268,12 +275,12 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
     [self.calendarView refreshHolidayData];
     [NSApplication.sharedApplication activateIgnoringOtherApps:YES];
     [self.window makeKeyAndOrderFront:nil];
-    if (self.pendingUpdateVersion) {
+    if (self.updater.ready && !self.window.attachedSheet) {
+        [self showReadyToInstall];
+    } else if (self.pendingUpdateVersion) {
         NSString *version = self.pendingUpdateVersion;
-        NSURL *URL = self.pendingUpdateURL;
         self.pendingUpdateVersion = nil;
-        self.pendingUpdateURL = nil;
-        [self showUpdateVersion:version URL:URL];
+        [self showUpdateVersion:version];
     }
 }
 
@@ -322,6 +329,13 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
 }
 
 - (void)fetchLatestReleaseManually:(BOOL)manual {
+    if (self.updater) {
+        if (manual && !self.window.attachedSheet) {
+            if (self.updater.ready) [self showReadyToInstall];
+            else [self showDownloadProgress];
+        }
+        return;
+    }
     if (manual) {
         self.manualUpdateCheckRequested = YES;
         [self showUpdateProgressIfNeeded];
@@ -349,7 +363,7 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
                 if (reportManually) {
                     [self finishUpdateCheckWithMessage:status == 404
                         ? @"GitHub 上暂时没有已发布的版本。"
-                        : @"检查更新失败，请稍后重试。" version:nil URL:nil];
+                        : @"检查更新失败，请稍后重试。" version:nil];
                 }
                 return;
             }
@@ -357,39 +371,33 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
                                                                       options:0
                                                                         error:nil] : nil;
             if (![release isKindOfClass:NSDictionary.class]) {
-                if (reportManually) [self finishUpdateCheckWithMessage:@"无法读取 GitHub 的版本信息。" version:nil URL:nil];
+                if (reportManually) [self finishUpdateCheckWithMessage:@"无法读取 GitHub 的版本信息。" version:nil];
                 return;
             }
             NSString *tag = release[@"tag_name"];
-            NSString *page = release[@"html_url"];
             NSString *installed = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
-            NSURL *releaseURL = [page isKindOfClass:NSString.class]
-                ? [NSURL URLWithString:page] : nil;
             NSArray *assets = release[@"assets"];
+            self.availableUpdateAsset = nil;
             BOOL hasDMG = NO;
             if ([assets isKindOfClass:NSArray.class]) {
                 for (id asset in assets) {
-                    if ([asset isKindOfClass:NSDictionary.class]
-                        && [asset[@"name"] isKindOfClass:NSString.class]
-                        && [asset[@"name"] hasSuffix:@".dmg"]) {
+                    if (MCUpdateAssetIsValid(asset, tag)) {
+                        self.availableUpdateAsset = asset;
                         hasDMG = YES;
                         break;
                     }
                 }
             }
-            BOOL validPage = [releaseURL.scheme isEqualToString:@"https"]
-                && [releaseURL.host isEqualToString:@"github.com"]
-                && [releaseURL.path hasPrefix:@"/nicing/mini-calendar/releases/"];
-            if (!MCVersionNumbers(tag) || !validPage) {
-                if (reportManually) [self finishUpdateCheckWithMessage:@"无法读取 GitHub 的版本信息。" version:nil URL:nil];
+            if (!MCVersionNumbers(tag)) {
+                if (reportManually) [self finishUpdateCheckWithMessage:@"无法读取 GitHub 的版本信息。" version:nil];
                 return;
             }
             if (!hasDMG) {
-                if (reportManually) [self finishUpdateCheckWithMessage:@"GitHub 上暂时没有可下载的安装包。" version:nil URL:nil];
+                if (reportManually) [self finishUpdateCheckWithMessage:@"GitHub 上暂时没有可验证的安装包，请稍后重试。" version:nil];
                 return;
             }
             if (MCCompareVersions(tag, installed) != NSOrderedDescending) {
-                if (reportManually) [self finishUpdateCheckWithMessage:@"当前已是最新版本。" version:nil URL:nil];
+                if (reportManually) [self finishUpdateCheckWithMessage:@"当前已是最新版本。" version:nil];
                 return;
             }
             NSString *version = [tag hasPrefix:@"v"] || [tag hasPrefix:@"V"]
@@ -403,13 +411,12 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
                                                     forKey:@"MiniCalendarLastNotifiedUpdateVersion"];
             if (!self.window.visible) {
                 self.pendingUpdateVersion = version;
-                self.pendingUpdateURL = releaseURL;
                 return;
             }
             if (reportManually) {
-                [self finishUpdateCheckWithMessage:nil version:version URL:releaseURL];
+                [self finishUpdateCheckWithMessage:nil version:version];
             } else {
-                [self showUpdateVersion:version URL:releaseURL];
+                [self showUpdateVersion:version];
             }
         });
     }];
@@ -441,11 +448,10 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
 }
 
 - (void)finishUpdateCheckWithMessage:(NSString *)message
-                            version:(NSString *)version
-                                URL:(NSURL *)URL {
+                            version:(NSString *)version {
     dispatch_block_t presentation = ^{
         if (version) {
-            [self showUpdateVersion:version URL:URL];
+            [self showUpdateVersion:version];
         } else {
             [self showUpdateMessage:message];
         }
@@ -466,17 +472,98 @@ static NSComparisonResult MCCompareVersions(NSString *candidate, NSString *insta
     [alert beginSheetModalForWindow:self.window completionHandler:nil];
 }
 
-- (void)showUpdateVersion:(NSString *)version URL:(NSURL *)URL {
+- (void)showUpdateVersion:(NSString *)version {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"极简日历 %@ 已发布", version];
     NSString *installed = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"未知";
     alert.informativeText = [NSString stringWithFormat:
-        @"当前版本 %@。可以前往 GitHub 下载新版本。", installed];
-    [alert addButtonWithTitle:@"查看更新"];
+        @"当前版本 %@。下载安装包后，将提示您重启以完成更新。", installed];
+    [alert addButtonWithTitle:@"下载并安装"];
     [alert addButtonWithTitle:@"稍后"];
+    NSDictionary *asset = self.availableUpdateAsset;
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
         if (response == NSAlertFirstButtonReturn) {
-            [NSWorkspace.sharedWorkspace openURL:URL];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self downloadUpdate:asset version:version];
+            });
+        }
+    }];
+}
+
+- (void)downloadUpdate:(NSDictionary *)asset version:(NSString *)version {
+    if (self.updater) return;
+    self.downloadVersion = version;
+    self.downloadStatus = @"正在连接下载服务器…";
+    self.downloadFraction = 0;
+    self.updater = [[MCUpdater alloc] initWithAsset:asset version:version];
+    __weak typeof(self) weakSelf = self;
+    self.updater.progressHandler = ^(double fraction, NSString *status) {
+        MCAppDelegate *self = weakSelf;
+        if (!self) return;
+        self.downloadFraction = fraction;
+        self.downloadStatus = status;
+        self.downloadAlert.informativeText = status;
+        self.downloadIndicator.doubleValue = fraction * 100;
+    };
+    self.updater.completionHandler = ^(NSError *error) {
+        MCAppDelegate *self = weakSelf;
+        if (!self) return;
+        BOOL cancelled = [error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled;
+        if (error) self.updater = nil;
+        dispatch_block_t presentation = ^{
+            if (cancelled) return;
+            if (error) [self showUpdateMessage:error.localizedDescription];
+            else if (self.window.visible) [self showReadyToInstall];
+        };
+        if (self.downloadAlert) {
+            self.pendingDownloadPresentation = presentation;
+            [self.window endSheet:self.downloadAlert.window];
+        } else if (self.window.visible) {
+            presentation();
+        }
+    };
+    [self showDownloadProgress];
+    [self.updater start];
+}
+
+- (void)showDownloadProgress {
+    if (self.downloadAlert || self.window.attachedSheet) return;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"正在下载极简日历 %@", self.downloadVersion];
+    alert.informativeText = self.downloadStatus ?: @"正在下载…";
+    NSProgressIndicator *indicator = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 0, 260, 16)];
+    indicator.indeterminate = NO;
+    indicator.minValue = 0;
+    indicator.maxValue = 100;
+    indicator.doubleValue = self.downloadFraction * 100;
+    alert.accessoryView = indicator;
+    [alert addButtonWithTitle:@"后台下载"];
+    [alert addButtonWithTitle:@"取消下载"];
+    self.downloadAlert = alert;
+    self.downloadIndicator = indicator;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        self.downloadAlert = nil;
+        self.downloadIndicator = nil;
+        dispatch_block_t presentation = self.pendingDownloadPresentation;
+        self.pendingDownloadPresentation = nil;
+        if (presentation) presentation();
+        else if (response == NSAlertSecondButtonReturn) [self.updater cancel];
+    }];
+}
+
+- (void)showReadyToInstall {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"更新已准备好";
+    alert.informativeText = [NSString stringWithFormat:@"极简日历 %@ 已下载并验证。重启后将安装新版本，您的设置和待办会保留。", self.downloadVersion];
+    [alert addButtonWithTitle:@"重启并安装"];
+    [alert addButtonWithTitle:@"稍后"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response != NSAlertFirstButtonReturn) return;
+        NSError *error = nil;
+        if ([self.updater restartToInstallAtURL:NSBundle.mainBundle.bundleURL error:&error]) {
+            [NSApplication.sharedApplication terminate:nil];
+        } else {
+            [self showUpdateMessage:error.localizedDescription];
         }
     }];
 }
@@ -902,6 +989,15 @@ static int MCRenderPreview(NSString *path, NSString *appearanceMode, NSString *c
 int main(void) {
     @autoreleasepool {
         NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
+        if ([arguments containsObject:@"--install-update"]) {
+            return MCInstallUpdate(arguments);
+        }
+        if ([arguments containsObject:@"--self-test-updater"]) {
+            return MCRunUpdaterTests();
+        }
+        if ([arguments containsObject:@"--self-test-update-download"]) {
+            return MCRunUpdateDownloadTest();
+        }
         if ([arguments containsObject:@"--self-test"]) {
             return MCRunSelfTests();
         }

@@ -838,16 +838,10 @@ static NSColor *MCGlassControlFocusedBorderColor(NSView *view) {
             [[NSBezierPath bezierPathWithRoundedRect:selectionRect
                                              xRadius:8
                                              yRadius:8] fill];
-        } else if (today) {
-            [MCAccentColor() setStroke];
-            NSBezierPath *outline = [NSBezierPath bezierPathWithRoundedRect:selectionRect
-                                                                    xRadius:8
-                                                                    yRadius:8];
-            outline.lineWidth = 1.0;
-            [outline stroke];
         }
 
         NSColor *dayColor = selected ? MCAccentForegroundColor()
+            : today ? MCAccentColor()
             : (inMonth ? MCPrimaryTextColor(self) : MCTertiaryTextColor(self));
         NSString *dayText = [NSString stringWithFormat:@"%ld", (long)parts.day];
         NSFont *dayFont = MCLatinFont(16, NSFontWeightMedium);
